@@ -84,27 +84,42 @@ async function imagesDir($: EngineInterface): Promise<string | undefined> {
 // Pastes are cached as <n>.png or <n>.webp (or another format), but the terminal only
 // decodes PNG, so anything else is converted once to <session>/image-view-<n>.png.
 // sips ships with macOS only, so on Linux a non-PNG paste still shows "no preview".
-async function pngFor($: EngineInterface, dir: string, n: number): Promise<string | undefined> {
+async function pngFor($: EngineInterface, dir: string, n: number): Promise<{ png: string; source: string } | undefined> {
   const png = `${dir}/${n}.png`
-  if (await $.fs.exists(png)) return png
+  if (await $.fs.exists(png)) return { png, source: png }
   const out = `${dir.replace(/\/images$/, '')}/image-view-${n}.png`
-  if (await $.fs.exists(out)) return out
   const entries = await $.fs.list(dir).catch(() => [])
-  const source = entries.find(entry => entry.kind === 'file' && entry.name.startsWith(`${n}.`))
-  if (source === undefined) return undefined
-  const sourcePath = `${dir}/${source.name}`
-  if (unconvertible.has(sourcePath)) return undefined
+  const file = entries.find(entry => entry.kind === 'file' && entry.name.startsWith(`${n}.`))
+  if (file === undefined) return undefined
+  const source = `${dir}/${file.name}`
+  if (await $.fs.exists(out)) return { png: out, source }
+  if (unconvertible.has(source)) return undefined
   const { exitCode } = await $.process
-    .run(['sips', '-s', 'format', 'png', '-Z', '800', sourcePath, '--out', out])
+    .run(['sips', '-s', 'format', 'png', '-Z', '800', source, '--out', out])
     .catch(() => ({ exitCode: 1 }))
-  if (exitCode === 0) return out
-  unconvertible.add(sourcePath)
+  if (exitCode === 0) return { png: out, source }
+  unconvertible.add(source)
   return undefined
 }
 
+// A press on a tile's label opens the paste itself, full size, in the system viewer.
+// ponytail: macOS `open` only; add xdg-open if Linux matters.
+async function openPaste($: EngineInterface, file: string) {
+  const { exitCode } = await $.process.run(['open', file]).catch(() => ({ exitCode: 1 }))
+  if (exitCode !== 0) $.ui.toast(`Couldn't open ${file}`)
+}
+
+// The label spans the tile, so a press anywhere under the picture opens it.
+function padLabel(text: string, columns: number): string {
+  const pad = Math.max(0, columns - text.length)
+  const left = Math.floor(pad / 2)
+  return ' '.repeat(left) + text + ' '.repeat(pad - left)
+}
+
 async function describe($: EngineInterface, dir: string | undefined, n: number): Promise<PastedImage> {
-  const path = dir === undefined ? undefined : await pngFor($, dir, n)
-  if (path === undefined || notPng.has(path)) return { n, path: null, size: null }
+  const file = dir === undefined ? undefined : await pngFor($, dir, n)
+  if (file === undefined || notPng.has(file.png)) return { n, path: null, source: null, size: null }
+  const path = file.png
   if (!sizes.has(path)) {
     const base64 = await $.fs.read(path, { as: 'bytes' }).then(
       bytes => bytes.base64,
@@ -114,12 +129,12 @@ async function describe($: EngineInterface, dir: string | undefined, n: number):
     if (head === null) {
       // A file no longer than the 24-byte header may still be being written; a longer one is settled.
       if (base64!.length > 32) notPng.add(path)
-      return { n, path: null, size: null }
+      return { n, path: null, source: null, size: null }
     }
     sizes.set(path, head ?? null)
     if (base64 !== undefined && !(await canDrawPictures($))) thumbs.set(path, decodeThumb(Uint8Array.fromBase64(base64)))
   }
-  return { n, path, size: sizes.get(path) ?? null }
+  return { n, path, source: file.source, size: sizes.get(path) ?? null }
 }
 
 async function show($: EngineInterface, draft: string) {
@@ -158,7 +173,7 @@ export const register: Register = on => {
     const list = await read($, images)
     if (list.length === 0) return next(e)
 
-    const { Box, Image, Raster, Text } = $.ui.resolve(e)
+    const { Box, Button, Image, Raster, Text } = $.ui.resolve(e)
     const cells = fitRow(list.map(image => image.size), e.props.maxRows, e.props.bodyColumns)
     if (cells.length === 0) return next(e)
     const hidden = list.length - cells.length
@@ -169,6 +184,7 @@ export const register: Register = on => {
         <Box flexDirection="row" columnGap={1}>
           {list.slice(0, cells.length).map((image, i) => {
             const { columns, rows } = cells[i] ?? { columns: 4, rows: 1 }
+            const source = image.source
             return (
               <Box key={`tile-${image.n}`} flexDirection="column" alignItems="center" borderStyle="round" borderDimColor>
                 {image.path === null ? (
@@ -191,7 +207,11 @@ export const register: Register = on => {
                     alt={`[Image #${image.n}]`}
                   />
                 )}
-                <Text dimColor>#{image.n}</Text>
+                {source === null ? (
+                  <Text dimColor>#{image.n}</Text>
+                ) : (
+                  <Button key={`open-${image.n}`} plain dimColor label={padLabel(`#${image.n}`, columns)} onPress={() => void openPaste($, source)} />
+                )}
               </Box>
             )
           })}

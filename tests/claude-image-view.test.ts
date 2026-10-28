@@ -106,6 +106,35 @@ test('a pasted image shows without another keystroke and clears when the draft d
   expect(await after.find({ type: 'Text', text: 'engine band' })).toBeDefined()
 })
 
+test('a press on a tile\'s label opens the paste in the system viewer', async ($, on) => {
+  const clock = mock.clock(on)
+  const dir = '/tmp/claude-501/-work/sess-1/images'
+  const draft = 'see [Image #1]'
+  const opened: (readonly string[])[] = []
+  on('session.start', () => ({ cwd: '/work' }))
+  on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }))
+  on('env.get', ($, e) => ({ value: GHOSTTY[e.name] }))
+  on('process.run', ($, e) => {
+    if (e.argv[0] === 'id') return ran('501\n')
+    opened.push(e.argv)
+    return ran('')
+  })
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('fs.list', () => ({ value: [{ name: '-work', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }))
+  on('fs.exists', ($, e) => ({ value: e.path === dir || e.path === `${dir}/1.png` }))
+  on('fs.read', () => ({ value: { base64: pngHead(800, 400) } }))
+  on('ui.render', () => ({ type: 'Text', props: {}, children: ['engine band'] }))
+
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await clock.advance(200)
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  // The label is padded to the picture's width, so the whole row under it is the button.
+  expect((await ui.find({ key: 'open-1' }))?.props).toMatchObject({ label: '           #1           ' })
+  await ui.press({ key: 'open-1' })
+  expect(opened).toEqual([['open', `${dir}/1.png`]])
+})
+
 test('a tile with no preview is neither re-read nor redrawn on every poll', async ($, on) => {
   const clock = mock.clock(on)
   const dir = '/tmp/claude-501/-work/sess-2/images'
@@ -155,8 +184,8 @@ test('tiles that don\'t fit become a +N label, and a band too short for one draw
   await clock.advance(200)
 
   const narrow = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, bodyColumns: 36 } })
-  expect(await narrow.find({ type: 'Text', text: '#4' })).toBeDefined()
-  expect(await narrow.find({ type: 'Text', text: '#5' })).toBeUndefined()
+  expect(await narrow.find({ key: 'open-4' })).toBeDefined()
+  expect(await narrow.find({ key: 'open-5' })).toBeUndefined()
   expect(await narrow.find({ type: 'Text', text: '+6' })).toBeDefined()
   await narrow.unmount()
 
